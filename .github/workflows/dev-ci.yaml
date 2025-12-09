@@ -2,104 +2,216 @@ name: Build & Deploy to Dev (GitOps)
 
 on:
   push:
-    branches: ["main"]
+    branches: [ "main" ]
     paths:
       - "api-gateway/**"
       - "users-service/**"
-      - ".github/workflows/**"
+      - "orders-service/**"
+      - "reports-service/**"
+      - ".github/workflows/dev-ci.yaml"
+
+concurrency:
+  group: dev-gitops-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write     # needed to push to GitOps repo
+  packages: write     # if using GHCR
+  id-token: write     # if you later switch to OIDC auth for AWS/ECR
+
+# env:
+#   ENV: dev
+#   REGISTRY: ghcr.io/${{ github.repository_owner }}
+#   GITOPS_REPO: your-org/your-gitops-repo  # TODO: change to real GitOps repo
+env:
+  ENV: dev
+
+  REGISTRY: ${{ secrets.REGISTRY }}
+  DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+  DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+
+  GITOPS_REPO: ${{ secrets.GITOPS_REPO }}
+  GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
+  GITOPS_BRANCH: main
 
 jobs:
-  build-and-update-gitops:
+  build-and-update-dev:
     runs-on: ubuntu-latest
 
-    env:
-      # Set repo-level env defaults from secrets
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
-      GITOPS_REPO: ${{ secrets.GITOPS_REPO }}
-      GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
-
     steps:
-      - name: Checkout app repo
+      - name: Checkout app monorepo
         uses: actions/checkout@v4
 
-      - name: Detect changed paths
+      - name: Detect changed services
         id: changes
         uses: dorny/paths-filter@v3
         with:
           filters: |
-            users:
-              - 'users-service/**'
-            gateway:
+            api-gateway:
               - 'api-gateway/**'
+            users-service:
+              - 'users-service/**'
+            orders-service:
+              - 'orders-service/**'
+            reports-service:
+              - 'reports-service/**'
 
-      - name: Show change detection
+      # Optional: short log so you can see what changed
+      - name: Print changed services
         run: |
-          echo "users-service changed?  ${{ steps.changes.outputs.users }}"
-          echo "api-gateway changed?   ${{ steps.changes.outputs.gateway }}"
+          echo "api-gateway: ${{ steps.changes.outputs.api-gateway }}"
+          echo "users-service: ${{ steps.changes.outputs.users-service }}"
+          echo "orders-service: ${{ steps.changes.outputs.orders-service }}"
+          echo "reports-service: ${{ steps.changes.outputs.reports-service }}"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build & push users-service image
-        if: steps.changes.outputs.users == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: ./users-service
-          push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/users-service:${{ github.sha }}
-
-      - name: Build & push api-gateway image
-        if: steps.changes.outputs.gateway == 'true'
-        uses: docker/build-push-action@v6
-        with:
-          context: ./api-gateway
-          push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/api-gateway:${{ github.sha }}
-
-      - name: Skip if no relevant changes
-        if: steps.changes.outputs.users != 'true' && steps.changes.outputs.gateway != 'true'
+      - name: Log in to container registry
         run: |
-          echo "No users-service or api-gateway changes. Skipping GitOps update."
-          exit 0
+           docker login "${{ env.REGISTRY }}" \
+              -u "${{ env.DOCKERHUB_USERNAME }}" \
+              -p "${{ env.DOCKERHUB_TOKEN }}"
 
-      - name: Clone GitOps repo and update dev tags
-        if: steps.changes.outputs.users == 'true' || steps.changes.outputs.gateway == 'true'
+
+
+      # =========================
+      # Build & push per service
+      # =========================
+      - name: Build & push api-gateway
+        id: build_api_gateway
+        if: steps.changes.outputs.api-gateway == 'true'
+        shell: bash
         run: |
-          # Make a safe clone of GitOps repo using PAT
-          # Expect secrets.GITOPS_REPO to be like: https://github.com/youruser/app-services-gitops.git
-          echo "Cloning GitOps repo..."
-          repo_url="${GITOPS_REPO}"
-          # remove protocol prefix if present (safe handling)
-          repo_host="${repo_url#https://}"
-          git clone "https://${GITOPS_PAT}@${repo_host}" gitops
-          cd gitops
+          set -euo pipefail
+          IMAGE="${REGISTRY}/api-gateway"
+          TAG="${GITHUB_SHA::7}"
+
+          echo "Building ${IMAGE}:${TAG}"
+          docker build -t "${IMAGE}:${TAG}" ./api-gateway
+          docker push "${IMAGE}:${TAG}"
+
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push users-service
+        id: build_users_service
+        if: steps.changes.outputs.users-service == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY}/users-service"
+          TAG="${GITHUB_SHA::7}"
+
+          echo "Building ${IMAGE}:${TAG}"
+          docker build -t "${IMAGE}:${TAG}" ./users-service
+          docker push "${IMAGE}:${TAG}"
+
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push orders-service
+        id: build_orders_service
+        if: steps.changes.outputs.orders-service == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY}/orders-service"
+          TAG="${GITHUB_SHA::7}"
+
+          echo "Building ${IMAGE}:${TAG}"
+          docker build -t "${IMAGE}:${TAG}" ./orders-service
+          docker push "${IMAGE}:${TAG}"
+
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Build & push reports-service
+        id: build_reports_service
+        if: steps.changes.outputs.reports-service == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          IMAGE="${REGISTRY}/reports-service"
+          TAG="${GITHUB_SHA::7}"
+
+          echo "Building ${IMAGE}:${TAG}"
+          docker build -t "${IMAGE}:${TAG}" ./reports-service
+          docker push "${IMAGE}:${TAG}"
+
+          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      # =========================
+      # Update GitOps repo (dev)
+      # =========================
+      - name: Checkout GitOps repo
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          ref: ${{ env.GITOPS_BRANCH }}
+          token: ${{ env.GITOPS_PAT }}
+          path: gitops
+
+      - name: Install yq
+        run: |
+          pip install yq
+
+      - name: Update dev kustomization with new image tags
+        working-directory: gitops
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KUSTOMIZATION="overlays/dev/kustomization.yaml"
+
+          # api-gateway
+          if [[ "${{ steps.changes.outputs.api-gateway }}" == "true" ]]; then
+            echo "Updating api-gateway image in ${KUSTOMIZATION}"
+            yq -i '
+              (.images[] | select(.name == "api-gateway").newTag)
+                = "${{ steps.build_api_gateway.outputs.tag }}"
+            ' "$KUSTOMIZATION"
+          fi
+
+          # users-service
+          if [[ "${{ steps.changes.outputs.users-service }}" == "true" ]]; then
+            echo "Updating users-service image in ${KUSTOMIZATION}"
+            yq -i '
+              (.images[] | select(.name == "users-service").newTag)
+                = "${{ steps.build_users_service.outputs.tag }}"
+            ' "$KUSTOMIZATION"
+          fi
+
+          # orders-service
+          if [[ "${{ steps.changes.outputs.orders-service }}" == "true" ]]; then
+            echo "Updating orders-service image in ${KUSTOMIZATION}"
+            yq -i '
+              (.images[] | select(.name == "orders-service").newTag)
+                = "${{ steps.build_orders_service.outputs.tag }}"
+            ' "$KUSTOMIZATION"
+          fi
+
+          # reports-service
+          if [[ "${{ steps.changes.outputs.reports-service }}" == "true" ]]; then
+            echo "Updating reports-service image in ${KUSTOMIZATION}"
+            yq -i '
+              (.images[] | select(.name == "reports-service").newTag)
+                = "${{ steps.build_reports_service.outputs.tag }}"
+            ' "$KUSTOMIZATION"
+          fi
+
+      - name: Commit & push GitOps changes (dev)
+        working-directory: gitops
+        shell: bash
+        run: |
+          set -euo pipefail
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          echo "Before change:"
-          cat k8s/overlays/dev/kustomization.yaml || true
-
-          # Update all newTag lines to the current commit SHA
-          # This is a simple, pragmatic sed replace of 'newTag: <whatever>' lines.
-          sed -i "s/^\\([[:space:]]*newTag:[[:space:]]*\\).*$/\\1${GITHUB_SHA}/" k8s/overlays/dev/kustomization.yaml
-
-          echo "After change:"
-          cat k8s/overlays/dev/kustomization.yaml || true
-
-          if ! git diff --quiet; then
-            git add k8s/overlays/dev/kustomization.yaml
-            git commit -m "ci: update dev images to ${GITHUB_SHA}"
-            git push origin HEAD:main
-          else
+          if git diff --quiet; then
             echo "No changes to commit in GitOps repo."
+            exit 0
           fi
+
+          git add overlays/dev/kustomization.yaml
+          git commit -m "chore(dev): bump images for $GITHUB_SHA"
+          git push origin "${GITOPS_BRANCH}"
