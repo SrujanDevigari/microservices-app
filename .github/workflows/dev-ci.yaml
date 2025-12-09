@@ -153,7 +153,10 @@ jobs:
 
       - name: Install yq
         run: |
-          pip install yq
+          run: |
+            sudo wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
 
       - name: Update dev kustomization with new image tags
         working-directory: gitops
@@ -161,12 +164,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          KUSTOMIZATION="overlays/dev/kustomization.yaml"
+          KUSTOMIZATION="k8s/overlays/dev/kustomization.yaml"
 
           # api-gateway
           if [[ "${{ steps.changes.outputs.api-gateway }}" == "true" ]]; then
             echo "Updating api-gateway image in ${KUSTOMIZATION}"
-            yq -i '
+            yq e -i '
               (.images[] | select(.name == "api-gateway").newTag)
                 = "${{ steps.build_api_gateway.outputs.tag }}"
             ' "$KUSTOMIZATION"
