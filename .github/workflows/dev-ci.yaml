@@ -2,7 +2,7 @@ name: Build & Deploy to Dev (GitOps)
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
     paths:
       - "api-gateway/**"
       - "users-service/**"
@@ -13,15 +13,16 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      # Set repo-level env defaults from secrets
       DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
-      GITOPS_REPO: ${{ secrets.GITOPS_REPO }} # e.g. https://github.com/youruser/app-services-gitops.git
+      DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+      GITOPS_REPO: ${{ secrets.GITOPS_REPO }}
+      GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
 
     steps:
-      # 1) Checkout this app repo
       - name: Checkout app repo
         uses: actions/checkout@v4
 
-      # 2) Detect which services changed
       - name: Detect changed paths
         id: changes
         uses: dorny/paths-filter@v3
@@ -37,7 +38,6 @@ jobs:
           echo "users-service changed?  ${{ steps.changes.outputs.users }}"
           echo "api-gateway changed?   ${{ steps.changes.outputs.gateway }}"
 
-      # 3) Set up Docker & login (common)
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -47,7 +47,6 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # 4) Build & push users-service only if it changed
       - name: Build & push users-service image
         if: steps.changes.outputs.users == 'true'
         uses: docker/build-push-action@v6
@@ -57,7 +56,6 @@ jobs:
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/users-service:${{ github.sha }}
 
-      # 5) Build & push api-gateway only if it changed
       - name: Build & push api-gateway image
         if: steps.changes.outputs.gateway == 'true'
         uses: docker/build-push-action@v6
@@ -67,42 +65,41 @@ jobs:
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/api-gateway:${{ github.sha }}
 
-      # 6) Skip GitOps update if nothing relevant changed
       - name: Skip if no relevant changes
         if: steps.changes.outputs.users != 'true' && steps.changes.outputs.gateway != 'true'
         run: |
           echo "No users-service or api-gateway changes. Skipping GitOps update."
           exit 0
 
-      # 7) Clone GitOps repo & update dev tags (only runs if at least one service changed)
       - name: Clone GitOps repo and update dev tags
         if: steps.changes.outputs.users == 'true' || steps.changes.outputs.gateway == 'true'
         run: |
-          git clone https://${{ secrets.GITOPS_PAT }}@${GITOPS_REPO#https://} gitops
+          # Make a safe clone of GitOps repo using PAT
+          # Expect secrets.GITOPS_REPO to be like: https://github.com/youruser/app-services-gitops.git
+          echo "Cloning GitOps repo..."
+          repo_url="${GITOPS_REPO}"
+          # remove protocol prefix if present (safe handling)
+          repo_host="${repo_url#https://}"
+          git clone "https://${GITOPS_PAT}@${repo_host}" gitops
           cd gitops
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
           echo "Before change:"
-          cat k8s/overlays/dev/kustomization.yaml
+          cat k8s/overlays/dev/kustomization.yaml || true
 
-#  We will still use the same tag (commit SHA) for both images
-          # Kustomize file has:
-          # images:
-            # - name: youruser/users-service
-              # newTag: someTag
-            # - name: youruser/api-gateway
-              # newTag: someTag
-          
-          # This command updates ALL 'newTag:' lines in that file:
-          sed -i "s/newTag: .*/newTag: ${GITHUB_SHA}/" k8s/overlays/dev/kustomization.yaml
+          # Update all newTag lines to the current commit SHA
+          # This is a simple, pragmatic sed replace of 'newTag: <whatever>' lines.
+          sed -i "s/^\\([[:space:]]*newTag:[[:space:]]*\\).*$/\\1${GITHUB_SHA}/" k8s/overlays/dev/kustomization.yaml
 
           echo "After change:"
-          cat k8s/overlays/dev/kustomization.yaml
+          cat k8s/overlays/dev/kustomization.yaml || true
 
           if ! git diff --quiet; then
-            git commit -am "Update dev images to ${GITHUB_SHA}"
-            git push
+            git add k8s/overlays/dev/kustomization.yaml
+            git commit -m "ci: update dev images to ${GITHUB_SHA}"
+            git push origin HEAD:main
           else
             echo "No changes to commit in GitOps repo."
           fi
