@@ -181,7 +181,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          KUSTOMIZATION="k8s/overlays/dev/kustomization.yaml"
+          KUSTOMIZATION="k8s/overlays/base/dev/kustomization.yaml"
 
           if [[ "${{ steps.changes.outputs.api-gateway }}" == "true" ]]; then
             yq e -i '
@@ -228,6 +228,6 @@ jobs:
             exit 0
           fi
 
-          git add k8s/overlays/dev/kustomization.yaml
+          git add k8s/overlays/base/dev/kustomization.yaml
           git commit -m "chore(dev): deploy ${GITHUB_SHA::7}"
           git push origin "${GITOPS_BRANCH}"
